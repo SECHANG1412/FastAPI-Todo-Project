@@ -25,6 +25,7 @@ app.include_router(
 
 # 루트(root) 경로 함수
 # 아직 app.get("/") 같은 데코레이터가 없어서 실제로는 호출되지 않는 상태
+@app.get("/")
 async def root():
     return {"message": "Welcome to the ToDo List API!"}
     # JSON 형태의 메시지를 반환
