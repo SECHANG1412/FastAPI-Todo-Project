@@ -1,3 +1,14 @@
+# Alembic이
+# “이 시점에 이런 변경이 있었어” 라고 히스토리 한 줄 추가한 것
+
+# 이 마이그레이션 파일 하나 = DB에 대한 커밋 하나
+
+# ❌ 커밋 메시지랑 다른 점
+# 커밋 메시지 → 설명만 있음
+# migration 파일 → 설명 + 실행 코드
+
+# 지금 네 파일을 Git으로 비유하면 딱 이거야 -> git commit --allow-empty -m "Create tasks table"
+
 """Create tasks table
 
 Revision ID: 60f0e778b37a

@@ -32,6 +32,8 @@ from app.database import Base
 # 그래야 Base.metadata 안에 tasks 테이블 정보가 등록됨
 import app.sql_models.task
 
+import app.sql_models.user
+
 
 # alembic.ini 파일 내용을 읽어서 config 객체로 가져옴
 # DB 주소(sqlalchemy.url) 같은 설정이 여기에 있음
