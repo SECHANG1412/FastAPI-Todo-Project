@@ -1,7 +1,7 @@
 # app/main.py
 
 from fastapi import FastAPI
-from .routers import tasks  # app/routers 폴더 안에 있는 tasks.py 파일을 가져온다 → 할 일(Task) 관련 기능들이 들어 있는 파일
+from .routers import tasks, auth  # app/routers 폴더 안에 있는 tasks.py 파일을 가져온다 → 할 일(Task) 관련 기능들이 들어 있는 파일
 from .routers import users  # 사용자(User) 관련 API 라우터 (회원가입, 로그인 등)
 
 
@@ -54,6 +54,28 @@ app.include_router(
     users.router,       # users.py에 정의된 APIRouter 객체
     prefix="/users",    # 모든 사용자 관련 API의 공통 URL 경로
     tags=["Users"]      # Swagger UI에서 "Users" 그룹으로 표시
+)
+
+
+# =========================================================
+# 인증(Authentication) 관련 API 라우터 등록 
+# =========================================================
+# app/routers/auth.py 안에 정의된 router 객체를
+# 메인 FastAPI 앱에 연결(include)한다.
+#
+# 이 라우터는:
+# - 사용자 로그인
+# - JWT 액세스 토큰 발급
+# 과 같은 "인증(AuthN)" 기능을 담당한다.
+#
+# prefix를 지정하지 않았기 때문에
+# auth.py 안에 정의된 경로를 그대로 사용한다.
+#
+# 예:
+#   POST /token        → 로그인 및 JWT 토큰 발급
+app.include_router(
+    auth.router, 
+    tags=["Authentication"]     # Swagger UI에서 "Authentication" 그룹으로 표시
 )
 
 
