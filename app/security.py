@@ -1,5 +1,9 @@
 # app/security.py
-
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+from jose import JWTError, jwt
+from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
 
 
@@ -67,3 +71,45 @@ def get_password_hash(password: str) -> str:
     """
     return pwd_context.hash(password)
 
+
+
+# JWT 서명에 사용할 비밀 키
+# 실무에서는 반드시 환경 변수로 관리해야 함
+SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_that_should_be_in_env_var_or_secret_manager_0123456789abcdef")
+
+# JWT 서명 알고리즘 (대칭키 방식)
+ALGORITHM = "HS256"
+
+# Access Token 만료 시간 (분 단위)
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+
+# OAuth2 Bearer 토큰 추출 설정
+# Authorization: Bearer <token> 헤더에서 토큰을 꺼내주는 역할
+# tokenUrl은 Swagger 문서용 (실제 호출 X)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+# JWT Access Token 생성 함수
+# 로그인 성공 시 호출되어 JWT를 생성/서명한다
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+
+    # JWT payload로 사용할 데이터 복사 (원본 dict 보호)
+    to_encode = data.copy()
+
+    # 만료 시간이 외부에서 전달된 경우
+    if expires_delta:
+        # 현재 UTC 시간 기준으로 만료 시간 계산
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        # 전달되지 않았다면 기본 만료 시간(ACCESS_TOKEN_EXPIRE_MINUTES) 사용
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    # JWT 표준 클레임인 exp(만료 시간)를 payload에 추가
+    to_encode.update({"exp": expire})
+
+    # payload를 SECRET_KEY로 서명하여 JWT 문자열 생성
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+    # 완성된 JWT(access token) 반환
+    return encoded_jwt
