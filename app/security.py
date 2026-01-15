@@ -3,8 +3,17 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
-from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from .database import get_db
+from .sql_models.user import User as SQLAlchemyUser
+
+from .schemas.token import TokenData
+
 
 
 # =========================================================
@@ -72,6 +81,8 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
+#################################################################################################################################
+
 
 # JWT 서명에 사용할 비밀 키
 # 실무에서는 반드시 환경 변수로 관리해야 함
@@ -113,3 +124,129 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
     # 완성된 JWT(access token) 반환
     return encoded_jwt
+
+#################################################################################################################################
+
+# =========================================================
+# 현재 사용자 가져오기 의존성 함수
+# =========================================================
+
+# 이 함수는 "인증이 필요한 모든 API의 문지기" 역할을 한다.
+# - JWT 토큰을 검사하고
+# - 토큰의 주인이 실제 DB에 존재하는 사용자면
+# - 그 사용자(SQLAlchemy User 객체)를 반환한다
+#
+# 이 함수가 실패하면:
+# → API 로직은 실행되지 않고
+# → 즉시 401 Unauthorized 응답이 반환된다
+#
+# 즉, Depends(get_current_user)가 붙은 API는
+# "로그인한 사용자만 접근 가능" 상태가 된다.
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),    # Authorization: Bearer 헤더에서 JWT 토큰 문자열만 자동으로 추출
+    db: AsyncSession = Depends(get_db)      # DB 세션 주입 → FastAPI가 요청마다 새로운 AsyncSession을 만들어 전달
+) -> SQLAlchemyUser:
+    
+    """
+    JWT 토큰을 검증하고 현재 로그인된 사용자를 반환하는 의존성 함수.
+
+    성공:
+    - SQLAlchemy User 객체 반환
+    
+    실패:
+    - HTTP 401 Unauthorized 발생
+    """
+
+    # -----------------------------------------------------
+    # 인증 실패 시 공통으로 사용할 예외 객체
+    # -----------------------------------------------------
+    # - 토큰이 없거나
+    # - 토큰이 위조되었거나
+    # - 토큰이 만료되었거나
+    # - 토큰의 사용자 정보가 잘못되었거나
+    # - DB에 해당 사용자가 존재하지 않으면
+    #
+    # 전부 이 예외로 처리한다
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        # -------------------------------------------------
+        # 1. JWT 디코딩 + 검증
+        # -------------------------------------------------
+        # 이 한 줄에서 동시에 일어나는 것:
+        # - JWT 서명 검증 (SECRET_KEY)
+        # - 알고리즘 검증 (HS256)
+        # - exp(만료 시간) 자동 검사
+        #
+        # 하나라도 실패하면 JWTError 발생
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+
+        # -------------------------------------------------
+        # 2. JWT payload에서 사용자 식별자 추출
+        # -------------------------------------------------
+        # JWT 표준 관례:
+        # - sub(subject) 클레임에 "토큰의 주인"을 넣는다
+        # - 여기서는 email을 사용
+        email: str = payload.get("sub")
+
+        # sub 클레임이 없으면 → 구조가 잘못된 토큰
+        if email is None:
+            print("JWT 'sub' claim missing")
+            raise credentials_exception
+        
+        # -------------------------------------------------
+        # 3. (선택) 토큰 데이터 구조 검증
+        # -------------------------------------------------
+        # Pydantic 모델을 사용해
+        # 토큰 데이터 형식을 명확히 한다
+        token_data = TokenData(email=email)
+    
+
+
+    except JWTError as e:
+        # -------------------------------------------------
+        # JWT 검증 실패
+        # -------------------------------------------------
+        # - 위조된 토큰
+        # - 만료된 토큰
+        # - 잘못된 형식의 토큰
+        #
+        # 전부 여기로 떨어진다
+        print(f"JWT Error during decoding: {e}")
+        raise credentials_exception
+    
+
+
+
+    # -----------------------------------------------------
+    # 4. DB에서 사용자 조회
+    # -----------------------------------------------------
+    # 토큰은 유효해도,
+    # 실제 DB에 사용자가 없을 수 있다
+    # (탈퇴, 삭제, 비활성화 등)
+    query = select(SQLAlchemyUser).where(
+        SQLAlchemyUser.email == token_data.email
+    )
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+
+
+    # -----------------------------------------------------
+    # 5. 사용자가 DB에 없으면 인증 실패
+    # -----------------------------------------------------
+    if user is None:
+        print(f"User not found in DB for email from token: {token_data.email}")
+        raise credentials_exception
+    
+
+    # -----------------------------------------------------
+    # 6. 인증 성공
+    # -----------------------------------------------------
+    # 이제 이 반환값이
+    # API 함수의 current_user 파라미터로 주입된다
+    return user

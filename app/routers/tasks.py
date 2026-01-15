@@ -1,189 +1,210 @@
 # app/routers/tasks.py
 
-from fastapi import APIRouter, HTTPException, status, Path, Depends
+from fastapi import APIRouter, HTTPException, status, Path, Depends 
 from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-
-# Pydantic 모델과 SQLAlchemy 모델 임포트
-from ..models.task import Task as PydanticTask, TaskCreate  # Pydantic 모델 (이름 충돌 피하기 위해 alias 사용)
-from ..sql_models.task import Task as SQLAlchemyTask        # SQLAlchemy 모델 (이름 충돌 피하기 위해 alias 사용)
-
-# 데이터베이스 세션 의존성 임포트
+from ..models.task import Task as PydanticTask, TaskCreate
+from ..sql_models.task import Task as SQLAlchemyTask
+from ..sql_models.user import User as SQLAlchemyUser
 from ..database import get_db
+from ..security import get_current_user
 
 
+# ---------------------------------------------------------
+# Task 관련 API 라우터
+# ---------------------------------------------------------
 router = APIRouter()
 
 
-# --- ORM을 사용한 Task CRUD 구현 ----
 
-# 1. Create Task (할 일 생성)
+# =========================================================
+# Task 생성 API
+# =========================================================
+
 @router.post(
-        "/", 
-        response_model=PydanticTask,            # 응답 데이터는 PydanticTask 모양
-        status_code=status.HTTP_201_CREATED,    # 성공 시 201 Created
-        summary="Create a new task"
+    "/",
+    response_model=PydanticTask,                        # 응답은 Pydantic Task 형태
+    status_code=status.HTTP_201_CREATED,                # 생성 성공 시 201
+    summary="Create a new task for the current user"
 )
 async def create_task(
-    task_in: TaskCreate,                        # 클라이언트가 보낸 데이터 (Pydantic 모델)
-    db: AsyncSession = Depends(get_db)          # DB 세션을 get_db로부터 주입받음
+    task_in: TaskCreate,                                        # 클라이언트가 전달한 Task 생성 데이터
+    db: AsyncSession = Depends(get_db),                         # DB 세션 주입
+    current_user: SQLAlchemyUser = Depends(get_current_user)    # 현재 로그인한 사용자 주입 - JWT 검증 실패 시 이 함수는 실행되지 않음
 ):
-    """
-    새로운 할 일을 생성하고 데이터베이스에 저장합니다.
-    """
-    # 1. Pydantic 모델(TaskCreate)을 SQLAlchemy 모델 객체로 변환
-    # **dict 형태로 바꿔서(**) SQLAlchemyTask 생성자에 전달
-    db_task = SQLAlchemyTask(**task_in.model_dump())    
+    # SQLAlchemy Task 객체 생성
+    # **중요**
+    # - owner_id를 현재 로그인한 사용자 ID로 설정
+    # - 클라이언트가 owner_id를 조작할 수 없도록 서버에서 직접 설정
+    db_task = SQLAlchemyTask(
+        **task_in.model_dump(),
+        owner_id=current_user.id
+    )
 
-    # 2. 이 객체를 세션에 등록 → 아직 DB에 저장된 건 아니고, "저장 예정" 상태
-    db.add(db_task)                                     
+    
+    db.add(db_task)             # DB에 추가
+    await db.commit()           # INSERT 쿼리 실행
+    await db.refresh(db_task)   # DB에서 최신 상태 다시 로드
 
-    # 3. commit → 실제로 INSERT SQL이 실행되어 DB에 영구 저장됨
-    await db.commit()         
+    print(f"User '{current_user.email}' created task: {db_task.title}")
 
-    # 4. refresh → DB가 자동으로 만든 값(id 같은 것)을 다시 객체에 채워 넣음               
-    await db.refresh(db_task)                          
-    print(f"Task created in DB: {db_task}")
-
-    # 5. SQLAlchemy 객체 반환 → FastAPI가 response_model(PydanticTask)에 맞게 자동 변환
-    return db_task 
+    return db_task    
 
 
 
-# 2. Read Tasks (할 일 목록 조회)
+# =========================================================
+# Task 목록 조회 API
+# =========================================================
 @router.get(
-        "/", 
-        response_model=List[PydanticTask], # 여러 개의 Task를 리스트로 변환
-        summary="Get all tasks"
+    "/",
+    response_model=List[PydanticTask],             # Task 리스트 반환
+    summary="Get tasks for the current user"
 )
 async def read_tasks(
-    skip: int = 0,                          # 몇 개를 건너뛸지 (페이징용)
-    limit: int = 100,                       # 최대 몇 개까지 가져올지
-    db: AsyncSession = Depends(get_db)      # DB 세션 주입
+    db: AsyncSession = Depends(get_db),                          # DB 세션 주입
+    current_user: SQLAlchemyUser = Depends(get_current_user),       # 현재 로그인한 사용자 주입
+
+    # 페이징 옵션
+    skip: int = 0,
+    limit: int = 100
 ):
-    """
-    모든 할 일 목록을 데이터베이스에서 조회합니다. (페이징 가능)
-    """
-    # 1. SQL 쿼리 만들기 → SELECT * FROM tasks OFFSET skip LIMIT limit
-    query = select(SQLAlchemyTask).offset(skip).limit(limit)
+    # 현재 로그인한 사용자의 Task만 조회
+    # - owner_id 조건 필수
+    query = (
+        select(SQLAlchemyTask)
+        .where(SQLAlchemyTask.owner_id == current_user.id)
+        .offset(skip)
+        .limit(limit)
+    )
 
-    # 2. 쿼리 실행
-    result = await db.execute(query)
+    result = await db.execute(query)    # 쿼리 실행
+    tasks = result.scalars().all()      # 결과를 리스트로 변환
 
-    # 3. 결과에서 SQLAlchemyTask 객체만 뽑아서 리스트로 만들기
-    tasks = result.scalars().all()
-    print(f"Reading all tasks (limit={limit}, skip={skip}) - Found {len(tasks)} items")
+    print(f"User '{current_user.email}' reading their tasks ({len(tasks)} items)")
 
-    # 4. 결과 반환 (자동으로 Pydantic 모델 리스트로 변환됨)
-    return tasks
+    return tasks                    
 
 
 
-# 3. Read Task (할 일 하나 조회)
+
+# =========================================================
+# 특정 Task 단건 조회 API
+# =========================================================
 @router.get(
-        "/{task_id}", 
-        response_model=PydanticTask, 
-        summary="Get a specific task by ID"
+    "/{task_id}",
+    response_model=PydanticTask,
+    summary="Get a specific task by ID for the current user"
 )
 async def read_task(
-    task_id: int = Path(..., title="The ID of the task to get", ge=1),  # task_id는 1 이상
-    db: AsyncSession = Depends(get_db)
+    task_id: int = Path(..., ge=1),                             # URL 경로에서 task_id 추출 (1 이상의 정수만 허용)
+    db: AsyncSession = Depends(get_db),                         # DB 세션 주입
+    current_user: SQLAlchemyUser = Depends(get_current_user)    # 현재 로그인한 사용자 주입
 ):
-    """
-    주어진 ID에 해당하는 특정 할 일을 데이터베이스에서 조회합니다.
-    """
-    # 1. Primary Key(id)로 Task 하나 조회
-    task = await db.get(SQLAlchemyTask, task_id)
+    # 특정 task_id + 현재 사용자 소유(owner_id) 조건으로 조회
+    # → 남의 Task 접근 차단
+    query = select(SQLAlchemyTask).where(
+        SQLAlchemyTask.id == task_id,
+        SQLAlchemyTask.owner_id == current_user.id
+    )
 
-    # 2. 없으면 404 에러
+    # 쿼리 실행
+    result = await db.execute(query)
+    task = result.scalar_one_or_none()
+
+    # Task가 없으면 (존재하지 않거나, 남의 Task)
     if task is None:
-        print(f"Task not found in DB for ID: {task_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Task with ID {task_id} not found"
+            detail="Task not found"
         )
-    print(f"Reading task from DB: {task}")
+    
+    print(f"User '{current_user.email}' reading task ID: {task_id}")
 
-    # 3. 조회된 Task 반환
     return task
 
 
-# 4. Update Task (할 일 수정)
-@router.put("/{task_id}", response_model=PydanticTask, summary="Update a task")
-async def update_task(
-    task_update: TaskCreate,
-    task_id: int = Path(..., title="The ID of the task to update", ge=1),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    주어진 ID에 해당하는 할 일을 데이터베이스에서 수정합니다.
-    """
-    # 1. 수정할 Task 객체 조회 
-    db_task = await db.get(SQLAlchemyTask, task_id)
 
-    # 없으면 404
+
+
+
+# =========================================================
+# Task 수정 API
+# =========================================================
+@router.put(
+    "/{task_id}",
+    response_model=PydanticTask,
+    summary="Update a task for the current user"
+)
+async def update_task(
+    task_update: TaskCreate,                                    # 수정할 Task 데이터
+    task_id: int = Path(..., ge=1),                             # URL 경로 파라미터
+    db: AsyncSession = Depends(get_db),                         # DB 세션 주입
+    current_user: SQLAlchemyUser = Depends(get_current_user)    # 현재 로그인한 사용자 주입
+):
+    # 수정 대상 Task 조회 (ID + owner_id 조건)
+    query = select(SQLAlchemyTask).where(
+        SQLAlchemyTask.id == task_id,
+        SQLAlchemyTask.owner_id == current_user.id
+    )
+    result = await db.execute(query)
+    db_task = result.scalar_one_or_none()
+
+    # Task가 없으면 404
     if db_task is None:
-        print(f"Task not found for update: ID={task_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Task with ID {task_id} not found"
+            detail="Task not found"
         )
-    
-    # 2. 클라이언트가 보낸 데이터만 꺼내기
-    # exclude_unset=True → 보내기 않은 필드는 건드리지 않음
+
+    # 전달된 데이터 중 실제로 값이 있는 필드만 추출
     update_data = task_update.model_dump(exclude_unset=True)
 
-    # 3. SQLAlchemy 객체의 속성 직접 수정
+    # 기존 Task 객체에 값 반영
     for key, value in update_data.items():
         setattr(db_task, key, value)
-    
-        # ⚠️ 여기서 db.add(db_task)는 사실 한 번만 해도 됨
-        # SQLAlchemy는 이미 객체 변경을 자동으로 감지함 
-        db.add(db_task)
 
-    # 5. 변경사항 커밋 → 실제 UPDATE 실행
-    await db.commit()
+    await db.commit()           # 변경 사항 저장
+    await db.refresh(db_task)   # 최신 상태 다시 로드
 
-    # 5. 변경된 객체 상태 DB와 동기화 (선택적이지만 권장)
-    await db.refresh(db_task)
-    print(f"Task updated in DB: {db_task}")
+    print(f"User '{current_user.email}' updated task ID: {task_id}")
 
-    # 6. 수정된 SQLAlchemyTask 객체 반환 (response_model 적용)
     return db_task
 
 
 
-# 5. Delete Task (할 일 삭제)
+
+# =========================================================
+# Task 삭제 API
+# =========================================================
 @router.delete(
-        "/{task_id}", 
-        status_code=status.HTTP_204_NO_CONTENT,  # 성공 시 204 (본문 없음)
-        summary="Delete a task"
+    "/{task_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a task for the current user"
 )
 async def delete_task(
-    task_id: int = Path(..., title="The ID of the task to delete", ge=1),
-    db: AsyncSession = Depends(get_db)
+    task_id: int = Path(..., ge=1),                             # 삭제할 Task ID
+    db: AsyncSession = Depends(get_db),                         # DB 세션 주입
+    current_user: SQLAlchemyUser = Depends(get_current_user)    # 현재 로그인한 사용자 주입
 ):
-    """
-    주어진 ID에 해당하는 할 일을 데이터베이스에서 삭제합니다.
-    """
-    # 1. 삭제할 Task 객체 조회
-    db_task = await db.get(SQLAlchemyTask, task_id)
+    # 삭제 대상 Task 조회 (ID + owner_id 조건)
+    query = select(SQLAlchemyTask).where(
+        SQLAlchemyTask.id == task_id,
+        SQLAlchemyTask.owner_id == current_user.id
+    )
+    result = await db.execute(query)
+    db_task = result.scalar_one_or_none()
 
-    # 없으면 404
+    # Task가 없으면 404
     if db_task is None:
-        print(f"Task not found for deletion: ID={task_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Task with ID {task_id} not found"
+            detail="Task not found"
         )
     
-    # 2. 세션에서 객체 삭제 요청 (아직 DB 반영 안됨)
-    await db.delete(db_task)
+    await db.delete(db_task)    # Task 삭제
+    await db.commit()           # DELETE 쿼리 실행
 
-    # 3. 변경사항 커밋 → 실제 DELETE 실행
-    await db.commit()
-    print(f"Task deleted from DB: ID={task_id}")
+    print(f"User '{current_user.email}' deleted task ID: {task_id}")
 
-    # 4. 204 응답은 본문 없음
-    return None
+    return None # 204 No Content → 반환값 없음
