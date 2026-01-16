@@ -104,16 +104,16 @@ async def read_task(
     # 특정 task_id + 현재 사용자 소유(owner_id) 조건으로 조회
     # → 남의 Task 접근 차단
     query = select(SQLAlchemyTask).where(
-        SQLAlchemyTask.id == task_id,
-        SQLAlchemyTask.owner_id == current_user.id
+        SQLAlchemyTask.id == task_id,               # ID 일치 확인
+        SQLAlchemyTask.owner_id == current_user.id  # 소유권 확인!
     )
 
     # 쿼리 실행
     result = await db.execute(query)
-    task = result.scalar_one_or_none()
+    task = result.scalar_one_or_none()  # 결과 가져오기
 
-    # Task가 없으면 (존재하지 않거나, 남의 Task)
     if task is None:
+        # Task가 없거나, 내 Task가 아니면 404 반환
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found"
@@ -121,7 +121,7 @@ async def read_task(
     
     print(f"User '{current_user.email}' reading task ID: {task_id}")
 
-    return task
+    return task # 내 Task가 맞으면 반환
 
 
 
